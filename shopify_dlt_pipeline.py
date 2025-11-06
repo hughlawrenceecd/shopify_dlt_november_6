@@ -178,6 +178,6 @@ def load_partner_api_transactions() -> None:
 
 if __name__ == "__main__":
     resources = ["products", "orders", "customers"]
-    # load_all_resources(resources, start_date="2025-10-10")
-    incremental_load_with_backloading()
+    load_all_resources(resources, start_date="2025-10-10")
+    # incremental_load_with_backloading()
     # load_partner_api_transactions()
