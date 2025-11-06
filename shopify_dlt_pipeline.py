@@ -14,6 +14,7 @@ from shopify_extras import (
     load_articles,
     load_inventory_levels_gql,
     load_products_metafields,
+    load_b2b_companies
 )
 
 # Logging config, DLT by default doesn't provide much in the way of logging.
@@ -72,6 +73,7 @@ def load_all_resources(resources: List[str], start_date: TAnyDateTime) -> None:
         run_loader("blogs", load_blogs, pipeline)
         run_loader("articles", load_articles, pipeline)
         run_loader("inventory_levels_gql", load_inventory_levels_gql, pipeline)
+        run_loader("b2b_companies", load_b2b_companies, pipeline)
 
         logger.info("✅ All custom Shopify resources loaded successfully.")
         logger.info("Data stored in: shopify.duckdb")
@@ -120,6 +122,7 @@ def incremental_load_with_backloading() -> None:
             # run_loader("products_metafields", load_products_metafields, pipeline)
             run_loader("blogs", load_blogs, pipeline)
             run_loader("articles", load_articles, pipeline)
+            run_loader("b2b_companies", load_b2b_companies, pipeline)
             run_loader("inventory_levels_gql", load_inventory_levels_gql, pipeline)
 
             logger.info(f"✅ Supplemental loaders complete for chunk {idx}")
