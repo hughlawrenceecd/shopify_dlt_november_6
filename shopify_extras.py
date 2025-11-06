@@ -637,11 +637,11 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
                 name
                 createdAt
                 updatedAt
-                # Uncomment once the minimal query works:
-                # contactsCount { count }
-                # locationsCount { count }
-                # totalSpent { amount currencyCode }
-                # mainContact { id email firstName lastName }
+                Uncomment once the minimal query works:
+                contactsCount { count }
+                locationsCount { count }
+                totalSpent { amount currencyCode }
+                mainContact { id email firstName lastName }
               }
             }
             pageInfo { hasNextPage endCursor }
