@@ -505,135 +505,31 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
         shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
         if not shop_url or not access_token:
-            logging.warning("⚠️ Missing Shopify credentials; skipping B2B companies.")
+            logging.warning("⚠️ Missing Shopify credentials; skipping b2b_companies.")
             return
 
-        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-10/graphql.json"
+        domain = shop_url.replace("https://","").replace("http://","").strip("/")
+        # Use the newer version for B2B
+        gql_url = f"https://{domain}/admin/api/2025-10/graphql.json"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
-        query = """
-query GetCompanies($first: Int!, $after: String) {
-  companies(first: $first, after: $after) {
-    edges {
-      node {
-        id
-        name
-        createdAt
-        updatedAt
-        externalId
-        contactsCount {
-          count
-        }
-        locationsCount {
-          count
-        }
-      }
-    }
-    pageInfo {
-      hasNextPage
-      endCursor
-    }
-  }
-}
-"""
-
-        @dlt.resource(write_disposition="replace", name="b2b_companies")
-        def companies_resource():
-            after = None
-            total = 0
-
-            while True:
-                resp = requests.post(
-                    gql_url,
-                    headers=headers,
-                    json={"query": query, "variables": {"first": 100, "after": after}},
-                )
-
-                print("B2B Response Raw:", resp.text)  # ✅ DEBUG
-
-                resp.raise_for_status()
-                raw = resp.json()
-
-                if "errors" in raw:
-                    logging.error(f"❌ Shopify B2B API error: {raw['errors']}")
-                    return
-
-                if "data" not in raw or "companies" not in raw["data"]:
-                    logging.warning(f"⚠️ No companies data returned: {raw}")
-                    return
-
-                data = raw["data"]["companies"]
-                edges = data.get("edges") or []
-
-                for edge in edges:
-                    total += 1
-                    yield edge["node"]
-
-                if not data["pageInfo"]["hasNextPage"]:
-                    break
-                after = data["pageInfo"]["endCursor"]
-
-            logging.info(f"✅ Loaded {total} B2B companies")
-
-        pipeline.run(companies_resource())
-
-    except Exception as e:
-        logging.exception(f"❌ Failed to load B2B companies: {e}")
-
-    """Loads all B2B company records from Shopify (via Admin GraphQL)."""
-    try:
-        shop_domain = get_base_shop_domain()
-        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-
-        if not shop_domain or not access_token:
-            logging.warning("⚠️ Missing Shopify credentials; skipping B2B companies.")
-            return
-
-        gql_url = f"https://{shop_domain}/admin/api/2024-01/graphql.json"
-        headers = {
-            "X-Shopify-Access-Token": access_token,
-            "Content-Type": "application/json",
-        }
-
-        # ✅ GraphQL query for companies
         query = """
         query GetCompanies($first: Int!, $after: String) {
           companies(first: $first, after: $after) {
             edges {
-              cursor
               node {
                 id
                 name
-                externalId
-                note
                 createdAt
                 updatedAt
-                customerSince
-                ordersCount {
-                  count
-                }
-                contactsCount {
-                  count
-                }
-                locationsCount {
-                  count
-                }
-                totalSpent {
-                  amount
-                  currencyCode
-                }
-                mainContact {
-                  id
-                  firstName
-                  lastName
-                  email
-                }
+                # Uncomment once the minimal query works:
+                # contactsCount { count }
+                # locationsCount { count }
+                # totalSpent { amount currencyCode }
+                # mainContact { id email firstName lastName }
               }
             }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
+            pageInfo { hasNextPage endCursor }
           }
         }
         """
@@ -642,38 +538,35 @@ query GetCompanies($first: Int!, $after: String) {
         def companies_resource():
             after = None
             total = 0
-
             while True:
                 resp = requests.post(
                     gql_url,
                     headers=headers,
-                    json={
-                        "query": query,
-                        "variables": {
-                            "first": 100,
-                            "after": after
-                        }
-                    },
+                    json={"query": query, "variables": {"first": 50, "after": after}},
                     timeout=30,
                 )
                 resp.raise_for_status()
-                data = resp.json()["data"]["companies"]
+                json_resp = resp.json()
 
-                edges = data["edges"]
-                for edge in edges:
-                    node = edge["node"]
-                    node["cursor"] = edge["cursor"]  # keep pagination cursor
-                    total += 1
-                    yield node
+                # NEW: show Shopify GraphQL errors explicitly
+                if "errors" in json_resp:
+                    logging.error(f"❌ Shopify B2B API error: {json_resp['errors']}")
+                    return
 
-                logging.info(f"🏢 Loaded {len(edges)} B2B companies (total={total})")
-
-                if not data["pageInfo"]["hasNextPage"]:
+                companies_data = json_resp["data"]["companies"]
+                edges = companies_data["edges"]
+                if not edges:
                     break
 
-                after = data["pageInfo"]["endCursor"]
+                for edge in edges:
+                    total += 1
+                    yield edge["node"]
 
-            logging.info(f"✅ Finished loading {total} B2B companies.")
+                if not companies_data["pageInfo"]["hasNextPage"]:
+                    break
+                after = companies_data["pageInfo"]["endCursor"]
+
+            logging.info(f"✅ Loaded {total} B2B companies")
 
         pipeline.run(companies_resource())
 
