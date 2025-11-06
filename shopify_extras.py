@@ -3,153 +3,52 @@ import requests
 import time
 import logging
 
-
-# ======================================================================
-#  URL NORMALIZATION (no strip() bugs, fully safe)
-# ======================================================================
-
-def normalize_shop_url(raw: str) -> str:
-    """
-    Safely normalises a Shopify shop name or URL:
-    - Removes protocol
-    - Removes trailing slashes
-    - Ensures .myshopify.com suffix
-    """
-    if not raw:
-        return ""
-
-    url = raw.strip()
-
-    # Remove protocol ONLY when at the start
-    if url.startswith("https://"):
-        url = url[len("https://"):]
-    elif url.startswith("http://"):
-        url = url[len("http://"):]
-
-    # Remove trailing slashes
-    url = url.rstrip("/")
-
-    # Ensure .myshopify.com
-    if not url.endswith(".myshopify.com"):
-        url = f"{url}.myshopify.com"
-
-    return url
-
-
-# ======================================================================
-#  OAUTH (Shopify Admin API 2026 requirement)
-# ======================================================================
-
-def fetch_admin_access_token(shop_domain: str) -> str:
-    """
-    Exchanges client_id + client_secret for a short-lived Admin API access token.
-    Required for Shopify Admin API after Jan 1, 2026.
-    """
-
-    client_id = dlt.config.get("sources.shopify_dlt.client_id")
-    client_secret = dlt.config.get("sources.shopify_dlt.client_secret")
-
-    if not client_id or not client_secret:
-        logging.error("❌ Missing Shopify OAuth client credentials.")
-        return ""
-
-    url = f"https://{shop_domain}/admin/oauth/access_token"
-
-    try:
-        resp = requests.post(
-            url,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
-            timeout=30,
-        )
-
-        resp.raise_for_status()
-
-        token = resp.json().get("access_token")
-        if not token:
-            logging.error("❌ No access_token returned from OAuth.")
-            return ""
-
-        return token
-
-    except Exception as e:
-        logging.exception(f"❌ Failed to fetch Admin access token: {e}")
-        return ""
-
-
-# ======================================================================
-#  CENTRAL ENDPOINT BUILDER (uses OAuth token + normalized domain)
-# ======================================================================
-
-def get_shopify_endpoints():
-    """
-    Returns (gql_url, rest_base_url, headers) with fresh Admin API token.
-    All loaders depend on this function.
-    """
-
-    raw_shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
-    if not raw_shop_url:
-        logging.warning("⚠️ Missing SHOP_URL; skipping.")
-        return None, None, None
-
-    domain = normalize_shop_url(raw_shop_url)
-
-    # Get short-lived Admin API token
-    access_token = fetch_admin_access_token(domain)
-    if not access_token:
-        return None, None, None
-
-    gql_url = f"https://{domain}/admin/api/2024-01/graphql.json"
-    rest_base = f"https://{domain}/admin/api/2024-01"
-
-    headers = {
-        "X-Shopify-Access-Token": access_token,
-        "Content-Type": "application/json"
-    }
-
-    return gql_url, rest_base, headers
-
-
-# ======================================================================
-#  LOAD INVENTORY LEVELS (GRAPHQL)
-# ======================================================================
-
 def load_inventory_levels_gql(pipeline: dlt.Pipeline) -> None:
+    """Loads inventory levels for the shop’s single location (Head Office)."""
+    import requests
+    import logging
+
     try:
-        gql_url, rest_base, headers = get_shopify_endpoints()
-        if not gql_url:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
+            logging.warning("⚠️ Missing Shopify credentials; skipping inventory_levels_gql.")
             return
 
-        # Step 1: Get location
+        gql_url = f"https://{shop_url.strip('https://').strip('http://').strip('/')}/admin/api/2024-01/graphql.json"
+        headers = {
+            "X-Shopify-Access-Token": access_token,
+            "Content-Type": "application/json",
+        }
+
+        # Step 1 — Get the one and only location dynamically
         loc_query = """
         query {
           locations(first: 1) {
-            edges { node { id name } }
+            edges {
+              node {
+                id
+                name
+              }
+            }
           }
         }
         """
-
-        loc_resp = requests.post(gql_url, headers=headers, json={"query": loc_query})
+        loc_resp = requests.post(gql_url, headers=headers, json={"query": loc_query}, timeout=30)
         loc_resp.raise_for_status()
-
         loc_data = loc_resp.json()
         edges = (loc_data.get("data") or {}).get("locations", {}).get("edges", [])
 
         if not edges:
-            logging.error("❌ No locations found.")
+            logging.error("❌ No locations found — check read_locations scope.")
             return
 
-        location = edges[0]["node"]
-        loc_id = location["id"]
-        loc_name = location["name"]
+        head_office = edges[0]["node"]
+        head_office_gid = head_office["id"]
+        head_office_name = head_office["name"]
+        logging.info(f"🏬 Using location: {head_office_name} ({head_office_gid})")
 
-        logging.info(f"🏬 Using location: {loc_name} ({loc_id})")
-
-        # Step 2: Query inventory
+        # Step 2 — Query inventory levels for that location
         query = """
         query GetInventoryLevels($locationId: ID!, $first: Int!, $after: String) {
           location(id: $locationId) {
@@ -158,7 +57,8 @@ def load_inventory_levels_gql(pipeline: dlt.Pipeline) -> None:
                 node {
                   id
                   quantities(names: ["available", "incoming", "committed", "damaged", "on_hand"]) {
-                    name quantity
+                    name
+                    quantity
                   }
                   item { id sku }
                 }
@@ -170,7 +70,7 @@ def load_inventory_levels_gql(pipeline: dlt.Pipeline) -> None:
         """
 
         @dlt.resource(write_disposition="replace", name="inventory_levels")
-        def inventory_resource():
+        def inventory_levels_resource():
             after = None
             total = 0
 
@@ -178,62 +78,54 @@ def load_inventory_levels_gql(pipeline: dlt.Pipeline) -> None:
                 resp = requests.post(
                     gql_url,
                     headers=headers,
-                    json={
-                        "query": query,
-                        "variables": {
-                            "locationId": loc_id,
-                            "first": 100,
-                            "after": after
-                        },
-                    },
+                    json={"query": query, "variables": {"locationId": head_office_gid, "first": 100, "after": after}},
+                    timeout=60,
                 )
                 resp.raise_for_status()
-
                 data = resp.json().get("data", {}).get("location", {})
-                inv = data.get("inventoryLevels", {})
-                edges = inv.get("edges", [])
+                if not data:
+                    logging.warning("⚠️ No location data in response — skipping batch.")
+                    break
 
+                inv_levels = data.get("inventoryLevels", {})
+                edges = inv_levels.get("edges", [])
                 if not edges:
                     break
 
                 for edge in edges:
                     node = edge.get("node")
                     if node:
-                        node["location_id"] = loc_id
-                        node["location_name"] = loc_name
+                        node["location_id"] = head_office_gid
+                        node["location_name"] = head_office_name
                         total += 1
                         yield node
 
-                page_info = inv.get("pageInfo", {})
+                page_info = inv_levels.get("pageInfo", {})
                 if not page_info.get("hasNextPage"):
                     break
-
                 after = page_info.get("endCursor")
 
-            logging.info(f"✅ Loaded {total} inventory levels.")
+            logging.info(f"✅ Finished loading {total} inventory levels from {head_office_name}.")
 
-        pipeline.run(inventory_resource())
+        pipeline.run(inventory_levels_resource())
 
     except Exception as e:
         logging.exception(f"❌ Failed to load inventory levels: {e}")
 
-
-# ======================================================================
-#  LOAD PAGES (GRAPHQL)
-# ======================================================================
-
 def load_pages(pipeline: dlt.Pipeline) -> None:
     try:
-        gql_url, rest_base, headers = get_shopify_endpoints()
-        if not gql_url:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
             return
+
+        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01/graphql.json"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         query = """
         query GetPages($first: Int!, $after: String) {
           pages(first: $first, after: $after) {
-            edges {
-              node { id title handle createdAt updatedAt }
-            }
+            edges { node { id title handle createdAt updatedAt } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -251,20 +143,71 @@ def load_pages(pipeline: dlt.Pipeline) -> None:
                     json={"query": query, "variables": {"first": 100, "after": after}},
                 )
                 resp.raise_for_status()
+                data = resp.json()["data"]["pages"]
 
-                pages = resp.json()["data"]["pages"]
-                edges = pages["edges"]
+                batch_count = len(data["edges"])
+                total += batch_count
 
-                for edge in edges:
+                for edge in data["edges"]:
+                    yield edge["node"]
+
+                if not data["pageInfo"]["hasNextPage"]:
+                    break
+                after = data["pageInfo"]["endCursor"]
+
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
+            return
+
+        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01/graphql.json"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
+
+        query = """
+        query GetPages($first: Int!, $after: String) {
+          pages(first: $first, after: $after) {
+            edges {
+              node {
+                id
+                title
+                handle
+                createdAt
+                updatedAt
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+        """
+
+        @dlt.resource(write_disposition="replace", name="pages")
+        def pages_resource():
+            after = None
+            total = 0
+
+            while True:
+                resp = requests.post(
+                    gql_url,
+                    headers=headers,
+                    json={"query": query, "variables": {"first": 100, "after": after}},
+                )
+                resp.raise_for_status()
+                data = resp.json()["data"]["pages"]
+
+                for edge in data["edges"]:
                     total += 1
                     yield edge["node"]
 
-                if not pages["pageInfo"]["hasNextPage"]:
+                print(f"📄 Loaded {len(data['edges'])} pages (total {total})")
+
+                if not data["pageInfo"]["hasNextPage"]:
                     break
+                after = data["pageInfo"]["endCursor"]
 
-                after = pages["pageInfo"]["endCursor"]
-
-            print(f"✅ Loaded {total} pages")
+            print(f"✅ Finished loading {total} pages")
 
         pipeline.run(pages_resource())
 
@@ -272,94 +215,87 @@ def load_pages(pipeline: dlt.Pipeline) -> None:
         print(f"❌ Failed to load pages: {e}")
 
 
-# ======================================================================
-#  LOAD PAGE METAFIELDS (REST)
-# ======================================================================
-
 def load_pages_metafields(pipeline: dlt.Pipeline) -> None:
     try:
-        gql_url, rest_base, headers = get_shopify_endpoints()
-        if not rest_base:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
             return
 
-        pages_url = f"{rest_base}/pages.json?limit=250"
-        page_ids = []
+        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
+        pages_url = f"{base_url}/pages.json?limit=250"
+        page_ids = []
         while pages_url:
             resp = requests.get(pages_url, headers=headers)
             resp.raise_for_status()
-
             data = resp.json()["pages"]
             page_ids.extend([p["id"] for p in data])
 
-            # Pagination
             link_header = resp.headers.get("Link", "")
             next_url = None
             if 'rel="next"' in link_header:
                 next_url = link_header.split(";")[0].strip("<>")
-
             pages_url = next_url
 
         @dlt.resource(write_disposition="replace", name="pages_metafields")
-        def pages_mf_resource():
+        def pages_metafields_resource():
             for pid in page_ids:
-                url = f"{rest_base}/pages/{pid}/metafields.json"
+                url = f"{base_url}/pages/{pid}/metafields.json"
                 resp = requests.get(url, headers=headers)
                 resp.raise_for_status()
-
                 for mf in resp.json()["metafields"]:
                     mf["page_id"] = pid
                     yield mf
 
-        pipeline.run(pages_mf_resource())
+        pipeline.run(pages_metafields_resource())
 
     except Exception as e:
         print(f"❌ Failed to load pages metafields: {e}")
 
 
-# ======================================================================
-#  LOAD COLLECTION METAFIELDS (REST)
-# ======================================================================
-
 def load_collections_metafields(pipeline: dlt.Pipeline) -> None:
     try:
-        gql_url, rest_base, headers = get_shopify_endpoints()
-        if not rest_base:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
             return
 
-        url = f"{rest_base}/custom_collections.json?limit=250"
+        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
+
+        url = f"{base_url}/custom_collections.json?limit=250"
+        collection_ids = []
         resp = requests.get(url, headers=headers)
         resp.raise_for_status()
-
         collections = resp.json()["custom_collections"]
-        collection_ids = [c["id"] for c in collections]
+        collection_ids.extend([c["id"] for c in collections])
 
         @dlt.resource(write_disposition="replace", name="collections_metafields")
-        def col_mf_resource():
+        def collections_metafields_resource():
             for cid in collection_ids:
-                url = f"{rest_base}/collections/{cid}/metafields.json"
-                resp = requests.get(url, headers=headers)
+                resp = requests.get(f"{base_url}/collections/{cid}/metafields.json", headers=headers)
                 resp.raise_for_status()
-
                 for mf in resp.json()["metafields"]:
                     mf["collection_id"] = cid
                     yield mf
 
-        pipeline.run(col_mf_resource())
+        pipeline.run(collections_metafields_resource())
 
     except Exception as e:
         print(f"❌ Failed to load collections metafields: {e}")
 
 
-# ======================================================================
-#  LOAD BLOGS (GRAPHQL)
-# ======================================================================
-
 def load_blogs(pipeline: dlt.Pipeline) -> None:
     try:
-        gql_url, rest_base, headers = get_shopify_endpoints()
-        if not gql_url:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
             return
+
+        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01/graphql.json"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         query = """
         query GetBlogs($first: Int!, $after: String) {
@@ -376,7 +312,6 @@ def load_blogs(pipeline: dlt.Pipeline) -> None:
         def blogs_resource():
             after = None
             total = 0
-
             while True:
                 resp = requests.post(
                     gql_url,
@@ -384,19 +319,13 @@ def load_blogs(pipeline: dlt.Pipeline) -> None:
                     json={"query": query, "variables": {"first": 100, "after": after}},
                 )
                 resp.raise_for_status()
-
-                blogs = resp.json()["data"]["blogs"]
-                edges = blogs["edges"]
-
-                for edge in edges:
+                data = resp.json()["data"]["blogs"]
+                for edge in data["edges"]:
                     total += 1
                     yield edge["node"]
-
-                if not blogs["pageInfo"]["hasNextPage"]:
+                if not data["pageInfo"]["hasNextPage"]:
                     break
-
-                after = blogs["pageInfo"]["endCursor"]
-
+                after = data["pageInfo"]["endCursor"]
             print(f"✅ Loaded {total} blogs")
 
         pipeline.run(blogs_resource())
@@ -405,15 +334,15 @@ def load_blogs(pipeline: dlt.Pipeline) -> None:
         print(f"❌ Failed to load blogs: {e}")
 
 
-# ======================================================================
-#  LOAD ARTICLES (GRAPHQL)
-# ======================================================================
-
 def load_articles(pipeline: dlt.Pipeline) -> None:
     try:
-        gql_url, rest_base, headers = get_shopify_endpoints()
-        if not gql_url:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
             return
+
+        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01/graphql.json"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         query = """
         query GetArticles($first: Int!, $after: String) {
@@ -430,7 +359,6 @@ def load_articles(pipeline: dlt.Pipeline) -> None:
         def articles_resource():
             after = None
             total = 0
-
             while True:
                 resp = requests.post(
                     gql_url,
@@ -438,19 +366,13 @@ def load_articles(pipeline: dlt.Pipeline) -> None:
                     json={"query": query, "variables": {"first": 100, "after": after}},
                 )
                 resp.raise_for_status()
-
-                arts = resp.json()["data"]["articles"]
-                edges = arts["edges"]
-
-                for edge in edges:
+                data = resp.json()["data"]["articles"]
+                for edge in data["edges"]:
                     total += 1
                     yield edge["node"]
-
-                if not arts["pageInfo"]["hasNextPage"]:
+                if not data["pageInfo"]["hasNextPage"]:
                     break
-
-                after = arts["pageInfo"]["endCursor"]
-
+                after = data["pageInfo"]["endCursor"]
             print(f"✅ Loaded {total} articles")
 
         pipeline.run(articles_resource())
@@ -458,54 +380,54 @@ def load_articles(pipeline: dlt.Pipeline) -> None:
     except Exception as e:
         print(f"❌ Failed to load articles: {e}")
 
-
-# ======================================================================
-#  LOAD PRODUCT METAFIELDS (REST)
-# ======================================================================
-
 def load_products_metafields(pipeline: dlt.Pipeline) -> None:
+    """Loads product metafields with progress tracking and defensive timeouts."""
     try:
-        gql_url, rest_base, headers = get_shopify_endpoints()
-        if not rest_base:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
+            logging.warning("⚠️ Missing Shopify credentials; skipping product_metafields.")
             return
 
-        # STEP 1: gather product IDs
-        products_url = f"{rest_base}/products.json?limit=250"
+        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
+
+        # Step 1: Collect all product IDs
+        products_url = f"{base_url}/products.json?limit=250"
         product_ids = []
+        total_pages = 0
 
         while products_url:
-            resp = requests.get(products_url, headers=headers)
+            total_pages += 1
+            resp = requests.get(products_url, headers=headers, timeout=30)
             resp.raise_for_status()
-
             data = resp.json().get("products", [])
             product_ids.extend([p["id"] for p in data])
 
-            # Pagination
             link_header = resp.headers.get("Link", "")
             next_url = None
-
             if 'rel="next"' in link_header:
                 next_url = link_header.split(";")[0].strip("<>")
-
             products_url = next_url
 
         if not product_ids:
-            logging.warning("⚠️ No products found.")
+            logging.warning("⚠️ No products found; skipping metafield load.")
             return
 
+        # Step 2: Fetch metafields per product
         start_time = time.time()
         total_metafields = 0
+        total_products = len(product_ids)
+        last_log_time = start_time
 
         @dlt.resource(write_disposition="replace", name="products_metafields")
-        def products_mf_resource():
+        def products_metafields_resource():
             nonlocal total_metafields
-
-            for product_id in product_ids:
+            for i, product_id in enumerate(product_ids, start=1):
                 try:
-                    url = f"{rest_base}/products/{product_id}/metafields.json"
+                    url = f"{base_url}/products/{product_id}/metafields.json"
                     resp = requests.get(url, headers=headers, timeout=20)
                     resp.raise_for_status()
-
                     metafields = resp.json().get("metafields", [])
 
                     for mf in metafields:
@@ -518,13 +440,53 @@ def load_products_metafields(pipeline: dlt.Pipeline) -> None:
                     time.sleep(1)
                     continue
 
-        pipeline.run(products_mf_resource())
+        pipeline.run(products_metafields_resource())
 
-        elapsed = round(time.time() - start_time, 2)
+        total_time = round(time.time() - start_time, 2)
         logging.info(
-            f"✅ Loaded {total_metafields} product metafields "
-            f"in {elapsed}s."
+            f"✅ Finished loading {total_metafields} metafields for {total_products} products in {total_time}s."
         )
 
     except Exception as e:
         logging.exception(f"❌ Failed to load product metafields: {e}")
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
+            return
+
+        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
+
+        # First, get all product IDs
+        products_url = f"{base_url}/products.json?limit=250"
+        product_ids = []
+        
+        while products_url:
+            resp = requests.get(products_url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()["products"]
+            product_ids.extend([p["id"] for p in data])
+
+            # Handle pagination
+            link_header = resp.headers.get("Link", "")
+            next_url = None
+            if 'rel="next"' in link_header:
+                next_url = link_header.split(";")[0].strip("<>")
+            products_url = next_url
+
+        @dlt.resource(write_disposition="replace", name="products_metafields")
+        def products_metafields_resource():
+            total_metafields = 0
+            for i, product_id in enumerate(product_ids):
+                    url = f"{base_url}/products/{product_id}/metafields.json"
+                    resp = requests.get(url, headers=headers)
+                    resp.raise_for_status()
+                    
+                    metafields = resp.json().get("metafields", [])
+                    for mf in metafields:
+                        mf["product_id"] = product_id
+                        total_metafields += 1
+                        yield mf
+                    
+
+        pipeline.run(products_metafields_resource())
