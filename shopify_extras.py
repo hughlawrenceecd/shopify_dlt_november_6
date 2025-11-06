@@ -512,23 +512,30 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         query = """
-        query GetCompanies($first: Int!, $after: String) {
-          companies(first: $first, after: $after) {
-            edges {
-              node {
-                id
-                name
-                createdAt
-                updatedAt
-                contactsCount
-                locationsCount
-                externalId
-              }
-            }
-            pageInfo { hasNextPage endCursor }
-          }
+query GetCompanies($first: Int!, $after: String) {
+  companies(first: $first, after: $after) {
+    edges {
+      node {
+        id
+        name
+        createdAt
+        updatedAt
+        externalId
+        contactsCount {
+          count
         }
-        """
+        locationsCount {
+          count
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"""
 
         @dlt.resource(write_disposition="replace", name="b2b_companies")
         def companies_resource():
