@@ -501,6 +501,78 @@ def load_products_metafields(pipeline: dlt.Pipeline) -> None:
         pipeline.run(products_metafields_resource())
 
 def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
+    try:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
+            logging.warning("⚠️ Missing Shopify credentials; skipping B2B companies.")
+            return
+
+        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-10/graphql.json"
+        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
+
+        query = """
+        query GetCompanies($first: Int!, $after: String) {
+          companies(first: $first, after: $after) {
+            edges {
+              node {
+                id
+                name
+                createdAt
+                updatedAt
+                contactsCount
+                locationsCount
+                externalId
+              }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        """
+
+        @dlt.resource(write_disposition="replace", name="b2b_companies")
+        def companies_resource():
+            after = None
+            total = 0
+
+            while True:
+                resp = requests.post(
+                    gql_url,
+                    headers=headers,
+                    json={"query": query, "variables": {"first": 100, "after": after}},
+                )
+
+                print("B2B Response Raw:", resp.text)  # ✅ DEBUG
+
+                resp.raise_for_status()
+                raw = resp.json()
+
+                if "errors" in raw:
+                    logging.error(f"❌ Shopify B2B API error: {raw['errors']}")
+                    return
+
+                if "data" not in raw or "companies" not in raw["data"]:
+                    logging.warning(f"⚠️ No companies data returned: {raw}")
+                    return
+
+                data = raw["data"]["companies"]
+                edges = data.get("edges") or []
+
+                for edge in edges:
+                    total += 1
+                    yield edge["node"]
+
+                if not data["pageInfo"]["hasNextPage"]:
+                    break
+                after = data["pageInfo"]["endCursor"]
+
+            logging.info(f"✅ Loaded {total} B2B companies")
+
+        pipeline.run(companies_resource())
+
+    except Exception as e:
+        logging.exception(f"❌ Failed to load B2B companies: {e}")
+
     """Loads all B2B company records from Shopify (via Admin GraphQL)."""
     try:
         shop_domain = get_base_shop_domain()
