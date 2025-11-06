@@ -501,6 +501,166 @@ def load_products_metafields(pipeline: dlt.Pipeline) -> None:
         pipeline.run(products_metafields_resource())
 
 def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
+    """Loads B2B companies + mainContact + contacts into 3 DLT tables."""
+    try:
+        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+        if not shop_url or not access_token:
+            logging.warning("⚠️ Missing Shopify credentials; skipping B2B companies.")
+            return
+
+        domain = shop_url.replace("https://", "").replace("http://", "").strip("/")
+        gql_url = f"https://{domain}/admin/api/2025-10/graphql.json"
+        headers = {
+            "X-Shopify-Access-Token": access_token,
+            "Content-Type": "application/json",
+        }
+
+        # ✅ B2B company + contacts + mainContact query
+        query = """
+        query GetCompanies($first: Int!, $after: String) {
+          companies(first: $first, after: $after) {
+            edges {
+              node {
+                id
+                name
+                externalId
+                note
+                createdAt
+                updatedAt
+
+                mainContact {
+                  id
+                  customer {
+                    id
+                    defaultEmailAddress {
+                      emailAddress
+                    }
+                  }
+                }
+
+                contacts(first: 50) {
+                  edges {
+                    node {
+                      id
+                      customer {
+                        id
+                        defaultEmailAddress {
+                          emailAddress
+                        }
+                      }
+                    }
+                  }
+                }
+
+                contactsCount { count }
+                locationsCount { count }
+                totalSpent { amount currencyCode }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+        """
+
+        # ✅ We buffer companies so that contacts + mainContact can reuse them
+        def fetch_all_companies():
+            after = None
+            all_companies = []
+
+            while True:
+                resp = requests.post(
+                    gql_url,
+                    headers=headers,
+                    json={"query": query, "variables": {"first": 50, "after": after}},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                json_resp = resp.json()
+
+                # Debug GraphQL errors
+                if "errors" in json_resp:
+                    logging.error(f"❌ Shopify B2B API error: {json_resp['errors']}")
+                    return []
+
+                companies = json_resp["data"]["companies"]
+                edges = companies["edges"]
+
+                for edge in edges:
+                    all_companies.append(edge["node"])
+
+                if not companies["pageInfo"]["hasNextPage"]:
+                    break
+
+                after = companies["pageInfo"]["endCursor"]
+
+            return all_companies
+
+        companies_buffer = fetch_all_companies()
+        logging.info(f"✅ Loaded {len(companies_buffer)} B2B companies")
+
+        # ✅ Resource: companies
+        @dlt.resource(write_disposition="replace", name="b2b_companies")
+        def companies_resource():
+            for company in companies_buffer:
+                yield company
+
+        # ✅ Resource: main contacts
+        @dlt.resource(write_disposition="replace", name="b2b_company_main_contacts")
+        def main_contacts_resource():
+            for company in companies_buffer:
+                mc = company.get("mainContact")
+                if not mc:
+                    continue
+
+                out = {
+                    "id": mc.get("id"),
+                    "company_id": company["id"],
+                }
+
+                cust = mc.get("customer")
+                if cust:
+                    out["customer_id"] = cust.get("id")
+                    email_block = cust.get("defaultEmailAddress")
+                    if email_block:
+                        out["email"] = email_block.get("emailAddress")
+
+                yield out
+
+        # ✅ Resource: contacts
+        @dlt.resource(write_disposition="replace", name="b2b_company_contacts")
+        def contacts_resource():
+            for company in companies_buffer:
+                edges = company.get("contacts", {}).get("edges", [])
+                for edge in edges:
+                    node = edge.get("node")
+                    if not node:
+                        continue
+
+                    out = {
+                        "id": node.get("id"),
+                        "company_id": company["id"],
+                    }
+
+                    cust = node.get("customer")
+                    if cust:
+                        out["customer_id"] = cust.get("id")
+                        email_block = cust.get("defaultEmailAddress")
+                        if email_block:
+                            out["email"] = email_block.get("emailAddress")
+
+                    yield out
+
+        # ✅ Run all 3 loaders
+        pipeline.run(companies_resource())
+        pipeline.run(main_contacts_resource())
+        pipeline.run(contacts_resource())
+
+    except Exception as e:
+        logging.exception(f"❌ Failed to load B2B companies: {e}")
     """Loads B2B companies + mainContact + contacts into separate DLT resources."""
     import requests
     import logging
