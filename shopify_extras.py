@@ -515,42 +515,37 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
         # We request: companies + mainContact + contacts(first: 50)
         # Everything else stays unchanged
         query = """
-        query GetCompanies($first: Int!, $after: String) {
-          companies(first: $first, after: $after) {
-            edges {
-              node {
-                id
-                name
-                externalId
-                note
-                createdAt
-                updatedAt
+       query GetCompanies($first: Int!, $after: String) {
+  companies(first: $first, after: $after) {
+    edges {
+      node {
+        id
+        name
+        externalId
+        note
+        createdAt
+        updatedAt
 
-                mainContact {
-                  id
-                  firstName
-                  lastName
-                  email
-                  phone
-                }
+        mainContact {
+          id
+        }
 
-                contacts(first: 50) {
-                  edges {
-                    node {
-                      id
-                      firstName
-                      lastName
-                      email
-                      phone
-                      locale
-                    }
-                  }
-                }
-              }
+        contacts(first: 50) {
+          edges {
+            node {
+              id
             }
-            pageInfo { hasNextPage endCursor }
           }
         }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+
         """
 
         # --- Resource 1 — Companies --------------------------------------------------
