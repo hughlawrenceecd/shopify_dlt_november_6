@@ -3,19 +3,28 @@ import requests
 import time
 import logging
 
+def get_base_shop_domain() -> str:
+    """
+    Returns the shop domain stripped of protocol and trailing slashes.
+    E.g. "https://staging-orderly.myshopify.com" -> "staging-orderly.myshopify.com"
+    """
+    shop_url = dlt.config.get("sources.shopify_dlt.shop_url") or ""
+    return shop_url.replace("https://", "").replace("http://", "").strip("/")
+
+
 def load_inventory_levels_gql(pipeline: dlt.Pipeline) -> None:
     """Loads inventory levels for the shop’s single location (Head Office)."""
     import requests
     import logging
 
     try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             logging.warning("⚠️ Missing Shopify credentials; skipping inventory_levels_gql.")
             return
 
-        gql_url = f"https://{shop_url.strip('https://').strip('http://').strip('/')}/admin/api/2024-01/graphql.json"
+        gql_url = f"https://{shop_domain}/admin/api/2024-01/graphql.json"
         headers = {
             "X-Shopify-Access-Token": access_token,
             "Content-Type": "application/json",
@@ -114,12 +123,12 @@ def load_inventory_levels_gql(pipeline: dlt.Pipeline) -> None:
 
 def load_pages(pipeline: dlt.Pipeline) -> None:
     try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             return
 
-        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01/graphql.json"
+        gql_url = f"https://{shop_domain}/admin/api/2024-01/graphql.json"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         query = """
@@ -217,12 +226,12 @@ def load_pages(pipeline: dlt.Pipeline) -> None:
 
 def load_pages_metafields(pipeline: dlt.Pipeline) -> None:
     try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             return
 
-        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        base_url = f"https://{shop_domain}/admin/api/2024-01"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         pages_url = f"{base_url}/pages.json?limit=250"
@@ -257,12 +266,12 @@ def load_pages_metafields(pipeline: dlt.Pipeline) -> None:
 
 def load_collections_metafields(pipeline: dlt.Pipeline) -> None:
     try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             return
 
-        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        base_url = f"https://{shop_domain}/admin/api/2024-01"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         url = f"{base_url}/custom_collections.json?limit=250"
@@ -289,12 +298,12 @@ def load_collections_metafields(pipeline: dlt.Pipeline) -> None:
 
 def load_blogs(pipeline: dlt.Pipeline) -> None:
     try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             return
 
-        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01/graphql.json"
+        gql_url = f"https://{shop_domain}/admin/api/2024-01/graphql.json"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         query = """
@@ -336,12 +345,12 @@ def load_blogs(pipeline: dlt.Pipeline) -> None:
 
 def load_articles(pipeline: dlt.Pipeline) -> None:
     try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             return
 
-        gql_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01/graphql.json"
+        gql_url = f"https://{shop_domain}/admin/api/2024-01/graphql.json"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         query = """
@@ -383,13 +392,13 @@ def load_articles(pipeline: dlt.Pipeline) -> None:
 def load_products_metafields(pipeline: dlt.Pipeline) -> None:
     """Loads product metafields with progress tracking and defensive timeouts."""
     try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             logging.warning("⚠️ Missing Shopify credentials; skipping product_metafields.")
             return
 
-        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        base_url = f"https://{shop_domain}/admin/api/2024-01"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         # Step 1: Collect all product IDs
@@ -449,12 +458,12 @@ def load_products_metafields(pipeline: dlt.Pipeline) -> None:
 
     except Exception as e:
         logging.exception(f"❌ Failed to load product metafields: {e}")
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
+        shop_domain = get_base_shop_domain()
         access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
+        if not shop_domain or not access_token:
             return
 
-        base_url = f"https://{shop_url.replace('https://','').replace('http://','').strip('/')}/admin/api/2024-01"
+        base_url = f"https://{shop_domain}/admin/api/2024-01"
         headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
 
         # First, get all product IDs
@@ -490,3 +499,104 @@ def load_products_metafields(pipeline: dlt.Pipeline) -> None:
                     
 
         pipeline.run(products_metafields_resource())
+
+def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
+    """Loads all B2B company records from Shopify (via Admin GraphQL)."""
+    try:
+        shop_domain = get_base_shop_domain()
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+
+        if not shop_domain or not access_token:
+            logging.warning("⚠️ Missing Shopify credentials; skipping B2B companies.")
+            return
+
+        gql_url = f"https://{shop_domain}/admin/api/2024-01/graphql.json"
+        headers = {
+            "X-Shopify-Access-Token": access_token,
+            "Content-Type": "application/json",
+        }
+
+        # ✅ GraphQL query for companies
+        query = """
+        query GetCompanies($first: Int!, $after: String) {
+          companies(first: $first, after: $after) {
+            edges {
+              cursor
+              node {
+                id
+                name
+                externalId
+                note
+                createdAt
+                updatedAt
+                customerSince
+                ordersCount {
+                  count
+                }
+                contactsCount {
+                  count
+                }
+                locationsCount {
+                  count
+                }
+                totalSpent {
+                  amount
+                  currencyCode
+                }
+                mainContact {
+                  id
+                  firstName
+                  lastName
+                  email
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+        """
+
+        @dlt.resource(write_disposition="replace", name="b2b_companies")
+        def companies_resource():
+            after = None
+            total = 0
+
+            while True:
+                resp = requests.post(
+                    gql_url,
+                    headers=headers,
+                    json={
+                        "query": query,
+                        "variables": {
+                            "first": 100,
+                            "after": after
+                        }
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()["data"]["companies"]
+
+                edges = data["edges"]
+                for edge in edges:
+                    node = edge["node"]
+                    node["cursor"] = edge["cursor"]  # keep pagination cursor
+                    total += 1
+                    yield node
+
+                logging.info(f"🏢 Loaded {len(edges)} B2B companies (total={total})")
+
+                if not data["pageInfo"]["hasNextPage"]:
+                    break
+
+                after = data["pageInfo"]["endCursor"]
+
+            logging.info(f"✅ Finished loading {total} B2B companies.")
+
+        pipeline.run(companies_resource())
+
+    except Exception as e:
+        logging.exception(f"❌ Failed to load B2B companies: {e}")
