@@ -636,3 +636,160 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
 
     except Exception as e:
         logging.exception(f"❌ Failed to load B2B companies: {e}")
+
+def load_b2b_company_locations(pipeline: dlt.Pipeline) -> None:
+    """
+    Loads B2B company locations with flattened billing & shipping addresses.
+    Produces a single DLT table: b2b_company_locations
+    """
+    import requests
+    import logging
+
+    try:
+        shop_domain = get_base_shop_domain()
+        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
+
+        if not shop_domain or not access_token:
+            logging.warning("⚠️ Missing Shopify credentials; skipping b2b_company_locations.")
+            return
+
+        gql_url = f"https://{shop_domain}/admin/api/2025-10/graphql.json"
+        headers = {
+            "X-Shopify-Access-Token": access_token,
+            "Content-Type": "application/json",
+        }
+
+        # ✅ Query: only shallow fields + addresses
+        query = """
+        query GetCompanyLocations($first: Int!, $after: String) {
+          companyLocations(first: $first, after: $after) {
+            edges {
+              node {
+                id
+                name
+                externalId
+                note
+                phone
+                createdAt
+                updatedAt
+                currency
+
+                company { id }
+
+                billingAddress {
+                  address1
+                  address2
+                  city
+                  province
+                  country
+                  zip
+                }
+
+                shippingAddress {
+                  address1
+                  address2
+                  city
+                  province
+                  country
+                  zip
+                }
+
+                ordersCount { count }
+                catalogsCount { count }
+                totalSpent { amount currencyCode }
+              }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        """
+
+        # --------------------------
+        # ✅ Pagination helper
+        # --------------------------
+        def fetch_all_locations():
+            all_rows = []
+            after = None
+
+            while True:
+                r = requests.post(
+                    gql_url,
+                    headers=headers,
+                    json={"query": query, "variables": {"first": 100, "after": after}},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                pl = r.json()
+
+                if "errors" in pl:
+                    logging.error(f"❌ Shopify B2B API error: {pl['errors']}")
+                    return []
+
+                block = pl["data"]["companyLocations"]
+                edges = block.get("edges", [])
+                if not edges:
+                    break
+
+                for e in edges:
+                    all_rows.append(e["node"])
+
+                if not block["pageInfo"]["hasNextPage"]:
+                    break
+
+                after = block["pageInfo"]["endCursor"]
+
+            return all_rows
+
+        locations = fetch_all_locations()
+        logging.info(f"✅ Loaded {len(locations)} B2B company locations")
+
+        # --------------------------
+        # ✅ Flatten + yield as 1 table
+        # --------------------------
+        @dlt.resource(write_disposition="replace", name="b2b_company_locations")
+        def locations_resource():
+            for loc in locations:
+                billing = loc.get("billingAddress") or {}
+                shipping = loc.get("shippingAddress") or {}
+
+                yield {
+                    # ---- Core fields ----
+                    "id": loc.get("id"),
+                    "company_id": (loc.get("company") or {}).get("id"),
+                    "name": loc.get("name"),
+                    "external_id": loc.get("externalId"),
+                    "note": loc.get("note"),
+                    "phone": loc.get("phone"),
+                    "created_at": loc.get("createdAt"),
+                    "updated_at": loc.get("updatedAt"),
+                    "currency": loc.get("currency"),
+
+                    # ---- Counts ----
+                    "orders_count": (loc.get("ordersCount") or {}).get("count"),
+                    "catalogs_count": (loc.get("catalogsCount") or {}).get("count"),
+
+                    # ---- Money ----
+                    "total_spent_amount": (loc.get("totalSpent") or {}).get("amount"),
+                    "total_spent_currency": (loc.get("totalSpent") or {}).get("currencyCode"),
+
+                    # ---- Billing address ----
+                    "billing_address1": billing.get("address1"),
+                    "billing_address2": billing.get("address2"),
+                    "billing_city": billing.get("city"),
+                    "billing_province": billing.get("province"),
+                    "billing_country": billing.get("country"),
+                    "billing_zip": billing.get("zip"),
+
+                    # ---- Shipping address ----
+                    "shipping_address1": shipping.get("address1"),
+                    "shipping_address2": shipping.get("address2"),
+                    "shipping_city": shipping.get("city"),
+                    "shipping_province": shipping.get("province"),
+                    "shipping_country": shipping.get("country"),
+                    "shipping_zip": shipping.get("zip"),
+                }
+
+        pipeline.run(locations_resource())
+
+    except Exception as e:
+        logging.exception(f"❌ Failed to load B2B company locations: {e}")
