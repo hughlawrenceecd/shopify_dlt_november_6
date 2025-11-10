@@ -507,8 +507,7 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
       - b2b_companies
       - b2b_main_contacts
     """
-    import requests
-    import logging
+
 
     try:
         shop_domain = get_base_shop_domain()
