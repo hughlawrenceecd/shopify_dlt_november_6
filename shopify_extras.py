@@ -642,8 +642,6 @@ def load_b2b_company_locations(pipeline: dlt.Pipeline) -> None:
     Loads B2B company locations with flattened billing & shipping addresses.
     Produces a single DLT table: b2b_company_locations
     """
-    import requests
-    import logging
 
     try:
         shop_domain = get_base_shop_domain()
