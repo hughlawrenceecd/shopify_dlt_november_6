@@ -502,8 +502,10 @@ def load_products_metafields(pipeline: dlt.Pipeline) -> None:
 
 def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
     """
-    Loads B2B companies with mainContact id and a page of contact ids.
-    Resource: b2b_companies
+    Loads B2B companies and their main contact details.
+    Produces exactly two tables:
+      - b2b_companies
+      - b2b_main_contacts
     """
     import requests
     import logging
@@ -515,93 +517,13 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
             logging.warning("⚠️ Missing Shopify credentials; skipping b2b_companies.")
             return
 
-        # Use the current/plus-safe version for B2B
         gql_url = f"https://{shop_domain}/admin/api/2025-10/graphql.json"
-        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
-
-        query = """
-        query GetCompanies($first: Int!, $after: String) {
-          companies(first: $first, after: $after) {
-            edges {
-              node {
-                id
-                name
-                externalId
-                note
-                createdAt
-                updatedAt
-                mainContact { id }
-                contacts(first: 50) {
-                  edges { node { id } }
-                  pageInfo { hasNextPage endCursor }
-                }
-              }
-            }
-            pageInfo { hasNextPage endCursor }
-          }
-        }
-        """
-
-        @dlt.resource(write_disposition="replace", name="b2b_companies")
-        def companies_resource():
-            after = None
-            total = 0
-
-            while True:
-                resp = requests.post(
-                    gql_url,
-                    headers=headers,
-                    json={"query": query, "variables": {"first": 50, "after": after}},
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-                if "errors" in payload:
-                    logging.error(f"❌ Shopify B2B API error: {payload['errors']}")
-                    return
-
-                data = (payload.get("data") or {}).get("companies", {})
-                edges = data.get("edges", [])
-                if not edges:
-                    break
-
-                for edge in edges:
-                    node = edge.get("node")
-                    if not node:
-                        continue
-                    total += 1
-                    yield node
-
-                if not data.get("pageInfo", {}).get("hasNextPage"):
-                    break
-                after = data["pageInfo"]["endCursor"]
-
-            logging.info(f"✅ Loaded {total} B2B companies")
-
-        pipeline.run(companies_resource())
-
-    except Exception as e:
-        logging.exception(f"❌ Failed to load B2B companies: {e}")
-    """Loads B2B companies + mainContact + contacts into 3 DLT tables."""
-
-    # ✅ Ensure imports are available to nested functions
-    import requests
-    import logging
-
-    try:
-        shop_url = dlt.config.get("sources.shopify_dlt.shop_url")
-        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_url or not access_token:
-            logging.warning("⚠️ Missing Shopify credentials; skipping B2B companies.")
-            return
-
-        domain = shop_url.replace("https://", "").replace("http://", "").strip("/")
-        gql_url = f"https://{domain}/admin/api/2025-10/graphql.json"
         headers = {
             "X-Shopify-Access-Token": access_token,
             "Content-Type": "application/json",
         }
 
+        # ✅ One unified query — includes mainContact and full customer info
         query = """
         query GetCompanies($first: Int!, $after: String) {
           companies(first: $first, after: $after) {
@@ -618,29 +540,13 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
                   id
                   customer {
                     id
-                    defaultEmailAddress {
-                      emailAddress
-                    }
+                    firstName
+                    lastName
+                    createdAt
+                    defaultEmailAddress { emailAddress }
+                    amountSpent { amount currencyCode }
                   }
                 }
-
-                contacts(first: 50) {
-                  edges {
-                    node {
-                      id
-                      customer {
-                        id
-                        defaultEmailAddress {
-                          emailAddress
-                        }
-                      }
-                    }
-                  }
-                }
-
-                contactsCount { count }
-                locationsCount { count }
-                totalSpent { amount currencyCode }
               }
             }
             pageInfo { hasNextPage endCursor }
@@ -648,306 +554,74 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
         }
         """
 
-        # ✅ Helper to fetch all companies once
+        # ✅ Pagination + flattening
         def fetch_all_companies():
             after = None
-            all_companies = []
+            all_rows = []
 
             while True:
-                resp = requests.post(
-                    gql_url,
-                    headers=headers,
-                    json={"query": query, "variables": {"first": 50, "after": after}},
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                json_resp = resp.json()
-
-                if "errors" in json_resp:
-                    logging.error(f"❌ Shopify B2B API error: {json_resp['errors']}")
-                    return []
-
-                companies = json_resp["data"]["companies"]
-                edges = companies["edges"]
-
-                for edge in edges:
-                    all_companies.append(edge["node"])
-
-                if not companies["pageInfo"]["hasNextPage"]:
-                    break
-
-                after = companies["pageInfo"]["endCursor"]
-
-            return all_companies
-
-        companies_buffer = fetch_all_companies()
-        logging.info(f"✅ Loaded {len(companies_buffer)} B2B companies")
-
-        @dlt.resource(write_disposition="replace", name="b2b_companies")
-        def companies_resource():
-            for c in companies_buffer:
-                yield c
-
-        @dlt.resource(write_disposition="replace", name="b2b_company_main_contacts")
-        def main_contacts_resource():
-            for company in companies_buffer:
-                mc = company.get("mainContact")
-                if not mc:
-                    continue
-
-                out = {"id": mc.get("id"), "company_id": company["id"]}
-
-                cust = mc.get("customer")
-                if cust:
-                    out["customer_id"] = cust.get("id")
-                    email_block = cust.get("defaultEmailAddress")
-                    if email_block:
-                        out["email"] = email_block.get("emailAddress")
-
-                yield out
-
-        @dlt.resource(write_disposition="replace", name="b2b_company_contacts")
-        def contacts_resource():
-            for company in companies_buffer:
-                edges = company.get("contacts", {}).get("edges", [])
-                for edge in edges:
-                    node = edge.get("node")
-                    if not node:
-                        continue
-
-                    out = {"id": node.get("id"), "company_id": company["id"]}
-
-                    cust = node.get("customer")
-                    if cust:
-                        out["customer_id"] = cust.get("id")
-                        email_block = cust.get("defaultEmailAddress")
-                        if email_block:
-                            out["email"] = email_block.get("emailAddress")
-
-                    yield out
-
-        pipeline.run(companies_resource())
-        pipeline.run(main_contacts_resource())
-        pipeline.run(contacts_resource())
-
-    except Exception as e:
-        logging.exception(f"❌ Failed to load B2B companies: {e}")
-
-def load_b2b_company_contacts(pipeline: dlt.Pipeline) -> None:
-    """
-    Loads flattened contact IDs per company (joins through contacts connection).
-    Resource: b2b_company_contacts
-    """
-    import requests
-    import logging
-
-    try:
-        shop_domain = get_base_shop_domain()
-        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_domain or not access_token:
-            logging.warning("⚠️ Missing Shopify credentials; skipping b2b_company_contacts.")
-            return
-
-        gql_url = f"https://{shop_domain}/admin/api/2025-10/graphql.json"
-        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
-
-        query = """
-        query GetCompaniesForContacts($first: Int!, $after: String) {
-          companies(first: $first, after: $after) {
-            edges {
-              node {
-                id
-                contacts(first: 100) {
-                  edges { node { id } }
-                  pageInfo { hasNextPage endCursor }
-                }
-              }
-            }
-            pageInfo { hasNextPage endCursor }
-          }
-        }
-        """
-
-        @dlt.resource(write_disposition="replace", name="b2b_company_contacts")
-        def contacts_resource():
-            after_companies = None
-            total = 0
-
-            while True:
-                resp = requests.post(
-                    gql_url,
-                    headers=headers,
-                    json={"query": query, "variables": {"first": 50, "after": after_companies}},
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-                if "errors" in payload:
-                    logging.error(f"❌ Shopify B2B API error: {payload['errors']}")
-                    return
-
-                companies = (payload.get("data") or {}).get("companies", {})
-                comp_edges = companies.get("edges", [])
-                if not comp_edges:
-                    break
-
-                for c_edge in comp_edges:
-                    c_node = c_edge.get("node") or {}
-                    company_id = c_node.get("id")
-                    contacts_conn = c_node.get("contacts") or {}
-                    contact_edges = contacts_conn.get("edges", []) or []
-
-                    for e in contact_edges:
-                        node = e.get("node")
-                        if not node:
-                            continue
-                        total += 1
-                        yield {
-                            "contact_id": node.get("id"),
-                            "company_id": company_id,
-                        }
-
-                    # (Optional) paginate contacts deeper per company if needed
-                    # Skipped for simplicity, but can be added if you expect >100 contacts/company
-
-                if not companies.get("pageInfo", {}).get("hasNextPage"):
-                    break
-                after_companies = companies["pageInfo"]["endCursor"]
-
-            logging.info(f"✅ Loaded {total} B2B company contacts")
-
-        pipeline.run(contacts_resource())
-
-    except Exception as e:
-        logging.exception(f"❌ Failed to load B2B company contacts: {e}")
-
-def load_b2b_contact_details(pipeline: dlt.Pipeline) -> None:
-    """
-    For every contact (via companies->contacts), resolve the underlying Customer
-    and extract first_name, last_name, default email, etc.
-    Resource: b2b_contact_details
-    """
-    import requests
-    import logging
-    import time
-
-    try:
-        shop_domain = get_base_shop_domain()
-        access_token = dlt.config.get("sources.shopify_dlt.private_app_password")
-        if not shop_domain or not access_token:
-            logging.warning("⚠️ Missing Shopify credentials; skipping b2b_contact_details.")
-            return
-
-        gql_url = f"https://{shop_domain}/admin/api/2025-10/graphql.json"
-        headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
-
-        # 1) Collect all contact IDs via companies (same pattern, minimal duplication to avoid cross-resource dependency)
-        list_contacts_query = """
-        query GetCompaniesForContacts($first: Int!, $after: String) {
-          companies(first: $first, after: $after) {
-            edges {
-              node {
-                id
-                contacts(first: 100) {
-                  edges { node { id } }
-                  pageInfo { hasNextPage endCursor }
-                }
-              }
-            }
-            pageInfo { hasNextPage endCursor }
-          }
-        }
-        """
-
-        contact_ids: list[dict] = []
-        after_companies = None
-
-        while True:
-            resp = requests.post(
-                gql_url,
-                headers=headers,
-                json={"query": list_contacts_query, "variables": {"first": 50, "after": after_companies}},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            if "errors" in payload:
-                logging.error(f"❌ Shopify B2B API error (collect): {payload['errors']}")
-                return
-
-            companies = (payload.get("data") or {}).get("companies", {})
-            comp_edges = companies.get("edges", [])
-            if not comp_edges:
-                break
-
-            for c_edge in comp_edges:
-                c_node = c_edge.get("node") or {}
-                company_id = c_node.get("id")
-                contacts_conn = c_node.get("contacts") or {}
-                contact_edges = contacts_conn.get("edges", []) or []
-                for e in contact_edges:
-                    node = e.get("node")
-                    if node and node.get("id"):
-                        contact_ids.append({"contact_id": node["id"], "company_id": company_id})
-
-            if not companies.get("pageInfo", {}).get("hasNextPage"):
-                break
-            after_companies = companies["pageInfo"]["endCursor"]
-
-        if not contact_ids:
-            logging.info("ℹ️ No B2B contacts found; skipping b2b_contact_details.")
-            return
-
-        # 2) For each contact id, resolve Customer details via companyContact(...)
-        detail_query = """
-        query GetContact($id: ID!) {
-          companyContact(id: $id) {
-            id
-            company { id }
-            customer {
-              id
-              firstName
-              lastName
-              defaultEmailAddress { emailAddress }
-              createdAt
-              amountSpent { amount currencyCode }
-            }
-          }
-        }
-        """
-
-        @dlt.resource(write_disposition="replace", name="b2b_contact_details")
-        def contact_details_resource():
-            total = 0
-            for item in contact_ids:
-                contact_id = item["contact_id"]
-                # Defensive sleep to avoid hammering the API if many contacts
-                # (tweak/remove if not needed)
-                time.sleep(0.02)
-
                 r = requests.post(
                     gql_url,
                     headers=headers,
-                    json={"query": detail_query, "variables": {"id": contact_id}},
+                    json={"query": query, "variables": {"first": 100, "after": after}},
                     timeout=30,
                 )
                 r.raise_for_status()
                 pl = r.json()
+
                 if "errors" in pl:
-                    logging.warning(f"⚠️ GraphQL error for {contact_id}: {pl['errors']}")
+                    logging.error(f"❌ Shopify B2B API error: {pl['errors']}")
+                    return []
+
+                block = pl["data"]["companies"]
+                edges = block.get("edges", [])
+                if not edges:
+                    break
+
+                for e in edges:
+                    all_rows.append(e["node"])
+
+                if not block["pageInfo"]["hasNextPage"]:
+                    break
+
+                after = block["pageInfo"]["endCursor"]
+
+            return all_rows
+
+        companies = fetch_all_companies()
+        logging.info(f"✅ Loaded {len(companies)} B2B companies")
+
+        # ------------------------------
+        # ✅ TABLE 1: b2b_companies
+        # ------------------------------
+        @dlt.resource(write_disposition="replace", name="b2b_companies")
+        def companies_resource():
+            for c in companies:
+                yield {
+                    "id": c.get("id"),
+                    "name": c.get("name"),
+                    "externalId": c.get("externalId"),
+                    "note": c.get("note"),
+                    "createdAt": c.get("createdAt"),
+                    "updatedAt": c.get("updatedAt"),
+                }
+
+        # ------------------------------
+        # ✅ TABLE 2: b2b_main_contacts
+        # ------------------------------
+        @dlt.resource(write_disposition="replace", name="b2b_main_contacts")
+        def main_contacts_resource():
+            for c in companies:
+                mc = c.get("mainContact")
+                if not mc:
                     continue
 
-                cc = (pl.get("data") or {}).get("companyContact")
-                if not cc:
-                    continue
-
-                cust = cc.get("customer") or {}
+                cust = mc.get("customer") or {}
                 email_obj = cust.get("defaultEmailAddress") or {}
 
-                total += 1
                 yield {
-                    "contact_id": cc.get("id"),
-                    "company_id": (cc.get("company") or {}).get("id"),
+                    "contact_id": mc.get("id"),
+                    "company_id": c.get("id"),
                     "customer_id": cust.get("id"),
                     "first_name": cust.get("firstName"),
                     "last_name": cust.get("lastName"),
@@ -957,9 +631,9 @@ def load_b2b_contact_details(pipeline: dlt.Pipeline) -> None:
                     "amount_spent_currency": (cust.get("amountSpent") or {}).get("currencyCode"),
                 }
 
-            logging.info(f"✅ Loaded {total} B2B contact details")
-
-        pipeline.run(contact_details_resource())
+        # ✅ Run both resources
+        pipeline.run(companies_resource())
+        pipeline.run(main_contacts_resource())
 
     except Exception as e:
-        logging.exception(f"❌ Failed to load B2B contact details: {e}")
+        logging.exception(f"❌ Failed to load B2B companies: {e}")
