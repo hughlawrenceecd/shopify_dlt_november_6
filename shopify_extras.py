@@ -2,6 +2,28 @@ import dlt
 import requests
 import time
 import logging
+import re
+
+def clean_gid(value):
+    """Extract numeric ID from Shopify GID (e.g. gid://shopify/Company/12345 → 12345)."""
+    if isinstance(value, str) and value.startswith("gid://shopify/"):
+        match = re.search(r"/(\d+)$", value)
+        if match:
+            return match.group(1)
+    return value
+
+
+def clean_record_gids(record: dict) -> dict:
+    """Recursively clean all GID values in a dict."""
+    cleaned = {}
+    for k, v in record.items():
+        if isinstance(v, dict):
+            cleaned[k] = clean_record_gids(v)
+        elif isinstance(v, list):
+            cleaned[k] = [clean_record_gids(i) if isinstance(i, dict) else clean_gid(i) for i in v]
+        else:
+            cleaned[k] = clean_gid(v)
+    return cleaned
 
 def get_base_shop_domain() -> str:
     """
@@ -618,7 +640,7 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
                 cust = mc.get("customer") or {}
                 email_obj = cust.get("defaultEmailAddress") or {}
 
-                yield {
+                record = {
                     "contact_id": mc.get("id"),
                     "company_id": c.get("id"),
                     "customer_id": cust.get("id"),
@@ -629,6 +651,8 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
                     "amount_spent_amount": (cust.get("amountSpent") or {}).get("amount"),
                     "amount_spent_currency": (cust.get("amountSpent") or {}).get("currencyCode"),
                 }
+
+                yield clean_record_gids(record)
 
         # ✅ Run both resources
         pipeline.run(companies_resource())
@@ -750,7 +774,7 @@ def load_b2b_company_locations(pipeline: dlt.Pipeline) -> None:
                 billing = loc.get("billingAddress") or {}
                 shipping = loc.get("shippingAddress") or {}
 
-                yield {
+                record = {
                     # ---- Core fields ----
                     "id": loc.get("id"),
                     "company_id": (loc.get("company") or {}).get("id"),
@@ -786,6 +810,8 @@ def load_b2b_company_locations(pipeline: dlt.Pipeline) -> None:
                     "shipping_country": shipping.get("country"),
                     "shipping_zip": shipping.get("zip"),
                 }
+
+                yield clean_record_gids(record)
 
         pipeline.run(locations_resource())
 
