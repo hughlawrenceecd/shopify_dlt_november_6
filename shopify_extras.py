@@ -612,13 +612,10 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
         companies = fetch_all_companies()
         logging.info(f"✅ Loaded {len(companies)} B2B companies")
 
-        # ------------------------------
-        # ✅ TABLE 1: b2b_companies
-        # ------------------------------
         @dlt.resource(write_disposition="replace", name="b2b_companies")
         def companies_resource():
             for c in companies:
-                yield {
+                record =  {
                     "id": c.get("id"),
                     "name": c.get("name"),
                     "externalId": c.get("externalId"),
@@ -627,9 +624,8 @@ def load_b2b_companies(pipeline: dlt.Pipeline) -> None:
                     "updatedAt": c.get("updatedAt"),
                 }
 
-        # ------------------------------
-        # ✅ TABLE 2: b2b_main_contacts
-        # ------------------------------
+                yield clean_record_gids(record)
+
         @dlt.resource(write_disposition="replace", name="b2b_main_contacts")
         def main_contacts_resource():
             for c in companies:
@@ -726,9 +722,6 @@ def load_b2b_company_locations(pipeline: dlt.Pipeline) -> None:
         }
         """
 
-        # --------------------------
-        # ✅ Pagination helper
-        # --------------------------
         def fetch_all_locations():
             all_rows = []
             after = None
@@ -764,10 +757,7 @@ def load_b2b_company_locations(pipeline: dlt.Pipeline) -> None:
 
         locations = fetch_all_locations()
         logging.info(f"✅ Loaded {len(locations)} B2B company locations")
-
-        # --------------------------
-        # ✅ Flatten + yield as 1 table
-        # --------------------------
+        
         @dlt.resource(write_disposition="replace", name="b2b_company_locations")
         def locations_resource():
             for loc in locations:
